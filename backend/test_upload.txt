@@ -1,0 +1,2 @@
+# Test file for upload
+This is a test document for the ChainMind upload functionality.

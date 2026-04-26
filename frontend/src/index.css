@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --primary: #3b82f6;
+  --secondary: #64748b;
+  --dark: #1e293b;
+  --light: #f8fafc;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background-color: var(--light);
+  color: var(--dark);
+  line-height: 1.6;
+}
+
+.chat-message {
+  @apply mb-4 p-4 rounded-lg shadow-sm;
+}
+
+.chat-message.user {
+  @apply bg-blue-50 text-right;
+}
+
+.chat-message.ai {
+  @apply bg-gray-50 text-left;
+}
+
+.btn {
+  @apply px-4 py-2 rounded-md font-medium transition-colors cursor-pointer disabled:cursor-not-allowed;
+}
+
+.btn-primary {
+  @apply bg-primary text-white hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed;
+}
+
+.btn-secondary {
+  @apply bg-gray-200 text-gray-700 hover:bg-gray-300;
+}
+
+.input-field {
+  @apply w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary;
+}
+
+.card {
+  @apply bg-white rounded-lg shadow-md p-6;
+}
+
+.tabs {
+  @apply flex mb-4 border-b border-gray-200;
+}
+
+.tab {
+  @apply px-4 py-2 font-medium border-b-2 transition-colors cursor-pointer;
+}
+
+.tab.active {
+  @apply border-primary text-primary;
+}
+
+.tab.inactive {
+  @apply border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300;
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-bounce {
+  animation: bounce 1s infinite;
+}
+
+@keyframes bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
