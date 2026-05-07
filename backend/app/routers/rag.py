@@ -1,6 +1,6 @@
 """
-RAG (Retrieval-Augmented Generation) 路由
-提供向量检索和增强问答功能
+RAG Router v2.0
+Enhanced retrieval with hybrid search + rerank + streaming output
 """
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -8,40 +8,82 @@ from pydantic import BaseModel
 from typing import List, Optional
 import httpx
 import json
+import asyncio
 
 from ..services.vector_store import get_vector_store
 
-router = APIRouter(prefix="/rag", tags=["RAG检索增强"])
+router = APIRouter(prefix="/rag", tags=["RAG"])
 
-
-# ============== 请求/响应模型 ==============
 
 class AddChunksRequest(BaseModel):
-    """添加文本块到向量库"""
     chunks: List[str]
     filename: str
 
+
 class QueryRequest(BaseModel):
-    """RAG 问答请求"""
     query: str
     top_k: Optional[int] = 5
 
+
 class SourceItem(BaseModel):
-    """来源片段"""
     content: str
     filename: str
     distance: Optional[float] = None
+    vector_score: Optional[float] = None
+    bm25_score: Optional[float] = None
+    hybrid_score: Optional[float] = None
+
 
 class QueryResponse(BaseModel):
-    """RAG 问答响应"""
     answer: str
     sources: List[SourceItem]
 
 
-# ============== 流式响应辅助函数 ==============
+def build_enhanced_prompt(query: str, contexts: List[dict]) -> str:
+    """Build enhanced prompt with better structure"""
+    if not contexts:
+        return f"""You are a professional knowledge base assistant. Please answer the user's question.
 
-async def generate_streaming_response(prompt: str, model: str = "llama3:8b"):
-    """生成流式响应"""
+User Question: {query}
+
+Instructions:
+1. If you don't have enough information, state it clearly
+2. Be accurate and concise
+3. Answer in the same language as the question
+
+Answer:"""
+
+    context_str = "\n\n".join([
+        "[Document {}] (Source: {}):\n{}\nRelevance Score: {:.2f}".format(
+            i + 1, 
+            ctx.get("filename", "unknown"),
+            ctx.get("content", ""),
+            ctx.get("hybrid_score", ctx.get("vector_score", 0.5))
+        )
+        for i, ctx in enumerate(contexts)
+    ])
+
+    return f"""You are a professional knowledge base assistant. Answer based on the provided documents.
+
+## Reference Documents
+{context_str}
+
+## User Question
+{query}
+
+## Answer Guidelines
+1. MUST base your answer on the provided reference documents
+2. If documents don't contain relevant information, clearly state: "Based on the provided documents, I cannot answer this question"
+3. Be accurate, concise, and professional
+4. Cite sources when appropriate (e.g., "According to Document 1...")
+5. Answer in the same language as the question
+6. Keep the answer within 300 words
+
+## Answer"""
+
+
+async def stream_ollama_response(prompt: str, model: str = "llama3:8b"):
+    """Stream response from Ollama API"""
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream(
@@ -62,21 +104,14 @@ async def generate_streaming_response(prompt: str, model: str = "llama3:8b"):
                         except json.JSONDecodeError:
                             continue
     except Exception as e:
-        yield f"错误: {str(e)}"
+        yield f"\n[Error: {str(e)}]"
 
-
-# ============== API 路由 ==============
 
 @router.post("/add", response_model=dict)
 async def add_chunks(request: AddChunksRequest):
-    """
-    将文本块添加到向量库
-
-    - **chunks**: 文本块列表
-    - **filename**: 来源文件名
-    """
+    """Add text chunks to vector store"""
     if not request.chunks:
-        raise HTTPException(status_code=400, detail="chunks 不能为空")
+        raise HTTPException(status_code=400, detail="Chunks cannot be empty")
 
     vector_store = get_vector_store()
     result = vector_store.add_documents(request.chunks, request.filename)
@@ -86,42 +121,21 @@ async def add_chunks(request: AddChunksRequest):
 
 @router.post("/query", response_model=QueryResponse)
 async def rag_query(request: QueryRequest):
-    """
-    RAG 问答：检索相关片段 + LLM 生成回答
-
-    - **query**: 用户问题
-    - **top_k**: 检索的相关片段数量（默认5）
-    """
+    """RAG query with hybrid search + rerank"""
     vector_store = get_vector_store()
 
-    # 1. 检索相关文档
-    retrieved_docs = vector_store.search(request.query, top_k=request.top_k)
+    # Use hybrid search with rerank
+    retrieved_docs = vector_store.search(
+        request.query, 
+        top_k=request.top_k,
+        use_hybrid=True,
+        use_rerank=True
+    )
 
-    # 2. 构建上下文
-    if retrieved_docs:
-        context_parts = []
-        for i, doc in enumerate(retrieved_docs, 1):
-            context_parts.append(f"[文档{i}] ({doc['filename']}):\n{doc['content']}")
-        context = "\n\n".join(context_parts)
+    # Build enhanced prompt
+    prompt = build_enhanced_prompt(request.query, retrieved_docs)
 
-        prompt = f"""你是一个知识库问答助手。请根据以下参考资料回答用户的问题。
-如果问题与参考资料相关，请基于参考资料回答；如果无关，你可以根据自己的知识回答。（但是务必用中文回答）
-
-参考资料：
-{context}
-
-用户问题：{request.query}
-
-请基于参考资料回答，如果参考资料中没有相关信息，请说明"根据提供的信息无法回答这个问题"。"""
-    else:
-        # 没有检索到相关文档
-        prompt = f"""你是一个知识库问答助手。请回答用户的问题。
-
-用户问题：{request.query}
-
-注意：如果没有足够的信息来回答问题，请如实说明。"""
-
-    # 3. 调用 LLM 生成回答
+    # Call LLM
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
@@ -133,16 +147,19 @@ async def rag_query(request: QueryRequest):
                 }
             )
             result = response.json()
-            answer = result.get("response", "抱歉，暂时无法生成回答")
+            answer = result.get("response", "Sorry, unable to generate answer")
     except Exception as e:
-        answer = f"抱歉，AI 服务暂时不可用：{str(e)}"
+        answer = "AI service unavailable: {}".format(str(e))
 
-    # 4. 构建响应
+    # Build sources
     sources = [
         SourceItem(
-            content=doc["content"],
-            filename=doc["filename"],
-            distance=doc.get("distance")
+            content=doc.get("content", ""),
+            filename=doc.get("filename", "unknown"),
+            distance=doc.get("distance"),
+            vector_score=doc.get("vector_score"),
+            bm25_score=doc.get("bm25_score"),
+            hybrid_score=doc.get("hybrid_score")
         )
         for doc in retrieved_docs
     ]
@@ -152,65 +169,47 @@ async def rag_query(request: QueryRequest):
 
 @router.post("/query/stream")
 async def rag_query_stream(request: QueryRequest):
-    """
-    RAG 问答（流式）：检索相关片段 + LLM 流式生成回答
-
-    - **query**: 用户问题
-    - **top_k**: 检索的相关片段数量（默认5）
-    """
+    """RAG query with streaming output"""
     vector_store = get_vector_store()
 
-    # 1. 检索相关文档
-    retrieved_docs = vector_store.search(request.query, top_k=request.top_k)
+    # Use hybrid search with rerank
+    retrieved_docs = vector_store.search(
+        request.query,
+        top_k=request.top_k,
+        use_hybrid=True,
+        use_rerank=True
+    )
 
-    # 2. 构建上下文
-    if retrieved_docs:
-        context_parts = []
-        for i, doc in enumerate(retrieved_docs, 1):
-            context_parts.append(f"[文档{i}] ({doc['filename']}):\n{doc['content']}")
-        context = "\n\n".join(context_parts)
+    # Build enhanced prompt
+    prompt = build_enhanced_prompt(request.query, retrieved_docs)
 
-        prompt = f"""你是一个知识库问答助手。请根据以下参考资料回答用户的问题。
-
-参考资料：
-{context}
-
-用户问题：{request.query}
-
-请基于参考资料回答，如果参考资料中没有相关信息，请说明"根据提供的信息无法回答这个问题"。"""
-    else:
-        # 没有检索到相关文档
-        prompt = f"""你是一个知识库问答助手。请回答用户的问题。（用中文回答）
-
-用户问题：{request.query}
-
-注意：如果没有足够的信息来回答问题，请如实说明。"""
-
-    # 3. 构建来源信息
+    # Build sources
     sources = [
-        SourceItem(
-            content=doc["content"],
-            filename=doc["filename"],
-            distance=doc.get("distance")
-        )
+        {
+            "content": doc.get("content", ""),
+            "filename": doc.get("filename", "unknown"),
+            "distance": doc.get("distance"),
+            "vector_score": doc.get("vector_score"),
+            "bm25_score": doc.get("bm25_score"),
+            "hybrid_score": doc.get("hybrid_score")
+        }
         for doc in retrieved_docs
     ]
 
-    # 4. 返回流式响应
     async def stream_generator():
-        full_response = ""
         try:
-            async for chunk in generate_streaming_response(prompt, "llama3:8b"):
-                full_response += chunk
-                # 发送 SSE 格式的数据
-                yield f"data: {json.dumps({'token': chunk, 'done': False})}\n\n"
+            async for chunk in stream_ollama_response(prompt, "llama3:8b"):
+                data = {"token": chunk, "done": False}
+                yield "data: " + json.dumps(data) + "\n\n"
+                await asyncio.sleep(0.001)
 
-            # 流式结束后，发送完成信号
-            yield f"data: {json.dumps({'token': '', 'done': True, 'sources': [s.dict() for s in sources]})}\n\n"
+            # Send completion signal with sources
+            done_data = {"token": "", "done": True, "sources": sources}
+            yield "data: " + json.dumps(done_data) + "\n\n"
 
         except Exception as e:
-            error_msg = f"错误: {str(e)}"
-            yield f"data: {json.dumps({'token': error_msg, 'done': True, 'error': True})}\n\n"
+            error_data = {"token": "\n[Error: {}]".format(str(e)), "done": True, "error": True}
+            yield "data: " + json.dumps(error_data) + "\n\n"
 
     return StreamingResponse(
         stream_generator(),
@@ -224,15 +223,15 @@ async def rag_query_stream(request: QueryRequest):
 
 
 @router.get("/search")
-async def search_docs(query: str, top_k: int = 5):
-    """
-    单纯检索文档（不调用 LLM）
-
-    - **query**: 查询文本
-    - **top_k**: 返回结果数量
-    """
+async def search_docs(query: str, top_k: int = 5, use_hybrid: bool = True, use_rerank: bool = True):
+    """Search documents without LLM generation"""
     vector_store = get_vector_store()
-    results = vector_store.search(query, top_k=top_k)
+    results = vector_store.search(
+        query, 
+        top_k=top_k,
+        use_hybrid=use_hybrid,
+        use_rerank=use_rerank
+    )
 
     return {
         "query": query,
@@ -243,28 +242,20 @@ async def search_docs(query: str, top_k: int = 5):
 
 @router.get("/stats")
 async def get_stats():
-    """
-    获取向量库统计信息
-    """
+    """Get vector store statistics"""
     vector_store = get_vector_store()
     return vector_store.get_stats()
 
 
 @router.delete("/clear")
 async def clear_vector_store():
-    """
-    清空向量库（谨慎操作）
-    """
+    """Clear all vectors (use with caution)"""
     vector_store = get_vector_store()
     return vector_store.clear_all()
 
 
 @router.delete("/file/{filename}")
 async def delete_file_vectors(filename: str):
-    """
-    删除某个文件的所有向量
-
-    - **filename**: 文件名
-    """
+    """Delete all vectors for a file"""
     vector_store = get_vector_store()
     return vector_store.delete_by_filename(filename)
