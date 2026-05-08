@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import UploadPanel from './UploadPanel'
 
 export default function ChatWindow() {
@@ -8,6 +8,15 @@ export default function ChatWindow() {
   const [sessionId] = useState(() => 'session_' + Math.random().toString(36).substr(2, 9))
   const [useRag, setUseRag] = useState(true)
   const [showUpload, setShowUpload] = useState(false)
+  const messagesEndRef = useRef(null)
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }
+
+  useEffect(() => {
+    scrollToBottom()
+  }, [messages])
 
   const sendMessage = async () => {
     if (!input.trim() || loading) return
@@ -16,7 +25,7 @@ export default function ChatWindow() {
     setInput('')
     setLoading(true)
 
-    setMessages(prev => [...prev, { role: 'user', content: userMessage }])
+    setMessages(prev => [...prev, { role: 'user', content: userMessage, sources: [] }])
 
     let assistantMessageId = messages.length + 1
 
@@ -60,9 +69,11 @@ export default function ChatWindow() {
                   fullResponse += data.token
                   setMessages(prev => {
                     const newMessages = [...prev]
-                    newMessages[assistantMessageId] = {
-                      ...newMessages[assistantMessageId],
-                      content: fullResponse
+                    if (newMessages[assistantMessageId]) {
+                      newMessages[assistantMessageId] = {
+                        ...newMessages[assistantMessageId],
+                        content: fullResponse
+                      }
                     }
                     return newMessages
                   })
@@ -79,22 +90,26 @@ export default function ChatWindow() {
 
       setMessages(prev => {
         const newMessages = [...prev]
-        newMessages[assistantMessageId] = {
-          role: 'assistant',
-          content: fullResponse,
-          streaming: false,
-          sources: sources
+        if (newMessages[assistantMessageId]) {
+          newMessages[assistantMessageId] = {
+            role: 'assistant',
+            content: fullResponse,
+            streaming: false,
+            sources: sources
+          }
         }
         return newMessages
       })
     } catch (error) {
       setMessages(prev => {
         const newMessages = [...prev]
-        newMessages[assistantMessageId] = {
-          role: 'assistant',
-          content: '抱歉，发生了错误：' + error.message,
-          streaming: false,
-          sources: []
+        if (newMessages[assistantMessageId]) {
+          newMessages[assistantMessageId] = {
+            role: 'assistant',
+            content: '抱歉，发生了错误：' + error.message,
+            streaming: false,
+            sources: []
+          }
         }
         return newMessages
       })
@@ -112,88 +127,121 @@ export default function ChatWindow() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center space-x-4">
-        <button
-          onClick={() => setShowUpload(!showUpload)}
-          className="btn btn-primary bg-green-600 hover:bg-green-700"
-        >
-          📤 {showUpload ? '收起上传' : '上传文档'}
-        </button>
-        <label className="flex items-center space-x-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={useRag}
-            onChange={(e) => setUseRag(e.target.checked)}
-            className="rounded text-primary focus:ring-primary"
-          />
-          <span className="text-gray-700">启用 RAG 增强</span>
-        </label>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => setShowUpload(!showUpload)}
+            className="btn btn-secondary flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+            </svg>
+            {showUpload ? '收起上传' : '上传文档'}
+          </button>
+          <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-400">
+            <input
+              type="checkbox"
+              checked={useRag}
+              onChange={(e) => setUseRag(e.target.checked)}
+              className="w-4 h-4 rounded border-gray-600 bg-dark-3 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-0"
+            />
+            <span>RAG增强</span>
+          </label>
+        </div>
+        <div className="text-sm text-gray-500">
+          {messages.length} 条消息
+        </div>
       </div>
 
       {showUpload && <UploadPanel />}
 
-      <div className="border border-gray-200 rounded-lg p-4 h-[400px] overflow-y-auto bg-gray-50">
-        {messages.length === 0 && (
-          <div className="flex items-center justify-center h-full text-gray-400">
-            <p className="text-center">开始对话吧！上传文档可以启用 RAG 增强</p>
-          </div>
-        )}
+      <div className="card overflow-hidden">
+        <div className="h-[450px] overflow-y-auto scrollbar-thin p-4 space-y-4">
+          {messages.length === 0 && (
+            <div className="flex flex-col items-center justify-center h-full text-gray-500">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center mb-4 shadow-lg shadow-indigo-500/30">
+                <span className="text-3xl">🤖</span>
+              </div>
+              <p className="text-lg font-medium text-gray-400 mb-2">开始对话吧</p>
+              <p className="text-sm">上传文档可以启用 RAG 增强，获得更准确的回答</p>
+            </div>
+          )}
 
-        {messages.map((msg, index) => (
-          <div key={index} className="mb-4">
-            <div className="font-bold mb-1">
-              <span className={msg.role === 'user' ? 'text-primary' : 'text-green-600'}>
-                {msg.role === 'user' ? '👤 你' : '🤖 助手'}
-              </span>
-            </div>
-            <div className={`p-3 rounded-lg ${msg.role === 'user' ? 'bg-blue-50 border border-blue-200' : 'bg-white border border-gray-200'}`}>
-              <pre className="whitespace-pre-wrap font-sans m-0">{msg.content}</pre>
-              {msg.streaming && (
-                <span className="animate-pulse">▊</span>
-              )}
-            </div>
-            {msg.sources && msg.sources.length > 0 && (
-              <div className="mt-2 text-sm text-gray-600">
-                <strong>参考来源：</strong>
-                <div className="mt-1 space-y-2">
-                  {msg.sources.map((s, i) => (
-                    <div key={i} className="p-2 bg-gray-100 rounded-md">
-                      📄 {s.filename}: {s.content.substring(0, 100)}...
+          {messages.map((msg, index) => (
+            <div key={index} className="animate-fadeInUp">
+              <div className={`chat-bubble ${msg.role === 'user' ? 'user' : 'assistant'}`}>
+                <div className="flex items-start gap-3">
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
+                    msg.role === 'user'
+                      ? 'bg-gradient-to-br from-emerald-500 to-teal-600'
+                      : 'bg-gradient-to-br from-indigo-500 to-purple-600'
+                  }`}>
+                    <span className="text-sm">{msg.role === 'user' ? '👤' : '🤖'}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-xs text-gray-400 mb-1">
+                      {msg.role === 'user' ? '你' : 'AI 助手'}
                     </div>
-                  ))}
+                    <div className="text-sm leading-relaxed whitespace-pre-wrap">
+                      {msg.content}
+                      {msg.streaming && <span className="streaming-cursor"></span>}
+                    </div>
+                  </div>
                 </div>
               </div>
-            )}
-          </div>
-        ))}
-
-        {loading && (
-          <div className="flex items-center justify-center py-4">
-            <div className="flex space-x-2">
-              <div className="w-2 h-2 bg-primary rounded-full animate-bounce"></div>
-              <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-              <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+              {msg.sources && msg.sources.length > 0 && (
+                <div className="mt-2 ml-11">
+                  <div className="flex flex-wrap gap-2">
+                    <span className="text-xs text-gray-500">参考来源：</span>
+                    {msg.sources.map((s, i) => (
+                      <span key={i} className="badge badge-primary">
+                        📄 {s.filename}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
-          </div>
-        )}
-      </div>
+          ))}
+          <div ref={messagesEndRef} />
+        </div>
 
-      <div className="flex space-x-3">
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyPress={handleKeyPress}
-          placeholder="输入你的问题..."
-          disabled={loading}
-          className="flex-1 input-field h-16 resize-none"
-        />
-        <button
-          onClick={sendMessage}
-          disabled={loading || !input.trim()}
-          className={`btn btn-primary h-16 px-6 ${loading || !input.trim() ? 'bg-gray-400 cursor-not-allowed' : 'bg-primary hover:bg-blue-600'}`}
-        >
-          {loading ? '发送中...' : '发送'}
-        </button>
+        <div className="p-4 border-t border-gray-800">
+          <div className="flex gap-3">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyPress={handleKeyPress}
+              placeholder="输入你的问题..."
+              disabled={loading}
+              className="input-field flex-1 h-14 resize-none"
+              rows={1}
+            />
+            <button
+              onClick={sendMessage}
+              disabled={loading || !input.trim()}
+              className="btn btn-primary h-14 px-6"
+            >
+              {loading ? (
+                <div className="flex items-center gap-2">
+                  <div className="typing-indicator flex gap-1">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </div>
+                </div>
+              ) : (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                </svg>
+              )}
+            </button>
+          </div>
+          <div className="flex items-center justify-between mt-2 text-xs text-gray-500">
+            <span>按 Enter 发送，Shift + Enter 换行</span>
+            <span>使用 llama3:8b 模型</span>
+          </div>
+        </div>
       </div>
     </div>
   )
